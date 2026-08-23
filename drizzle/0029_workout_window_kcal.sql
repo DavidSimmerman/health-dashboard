@@ -1,0 +1,1 @@
+ALTER TABLE "workouts" ADD COLUMN "apple_active_kcal" real;

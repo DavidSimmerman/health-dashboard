@@ -149,12 +149,23 @@ export function modeDeficit(mode: GoalMode, bodyFatPct: number, weightKg: number
 // HealthKit over-estimates PASSIVE active energy; dedicated workout tracking (the
 // walking pad) is trusted. So trusted kcal ride at 1.0 and only the passive
 // remainder gets the haircut. `dailyActiveKcal` already includes the workout kcal.
+//
+// `countedKcal` is how much of `dailyActiveKcal` those trusted workouts ALREADY occupy —
+// Apple's own activeEnergyBurned summed over their windows. It is NOT the same number as
+// `trustedKcal`, and conflating them is a real error: our figure REPLACES Apple's for that
+// window, so the passive remainder is the day minus APPLE'S share, not minus ours. A 56-min
+// run Apple credited ~600 while our distance formula says 515 would otherwise leave 220
+// "passive" when only ~135 really is — haircutting ~85 kcal of genuine run energy as couch time.
+// Defaults to trustedKcal, reproducing the old behaviour for workouts synced before the iOS app
+// began sending the window sum. 0 is valid and distinct from absent: the Watch was off, so Apple
+// counted nothing for that hour and the whole day outside it is passive.
 export function correctActive(
 	dailyActiveKcal: number,
 	trustedKcal: number,
-	factor: number
+	factor: number,
+	countedKcal: number = trustedKcal
 ): number {
-	const passive = Math.max(0, dailyActiveKcal - trustedKcal);
+	const passive = Math.max(0, dailyActiveKcal - countedKcal);
 	return trustedKcal + factor * passive;
 }
 
@@ -163,12 +174,17 @@ export function correctActive(
 // the factor that scales the window's average PASSIVE active to reality with
 // trusted held fixed. Clamped; returns 1 (no correction) when there's too little
 // passive signal to learn from (e.g. every active calorie came from a workout).
+// `countedAvg` mirrors correctActive's `countedKcal`: training has to solve the SAME equation
+// the correction applies, real = trusted + f × (raw − counted). Using trusted in the denominator
+// while the correction subtracts counted biases the learned factor on every day where Apple's
+// window sum differs from the number we credit. Defaults to trustedAvg (old behaviour).
 export function activeCorrectionFactor(
 	realActiveAvg: number,
 	rawActiveAvg: number,
-	trustedAvg: number
+	trustedAvg: number,
+	countedAvg: number = trustedAvg
 ): number {
-	const passiveAvg = rawActiveAvg - trustedAvg;
+	const passiveAvg = rawActiveAvg - countedAvg;
 	if (!(passiveAvg > 50)) return 1;
 	return clamp((realActiveAvg - trustedAvg) / passiveAvg, 0.4, 1.2);
 }

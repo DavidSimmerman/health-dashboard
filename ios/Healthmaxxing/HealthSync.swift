@@ -329,12 +329,13 @@ final class HealthSync {
     private var pendingWorkoutAnchor: HKQueryAnchor?
 
     private func collectWorkouts() async throws -> [[String: Any]] {
-        // One-time backfill: distanceKm was added after some workouts already synced.
-        // Clearing the anchor once re-POSTs every workout WITH distance (the server
-        // upsert is idempotent, so re-sending is harmless). Versioned flag → runs once.
-        if !UserDefaults.standard.bool(forKey: "workoutDistanceBackfilled_v2") {
+        // One-time backfill: distanceKm (v2) and then appleActiveKcal (v3) were added after
+        // workouts had already synced. Clearing the anchor once re-POSTs every workout WITH
+        // the new field (the server upsert is idempotent, so re-sending is harmless).
+        // Versioned flag → runs once per field added.
+        if !UserDefaults.standard.bool(forKey: "workoutDistanceBackfilled_v3") {
             UserDefaults.standard.removeObject(forKey: "workoutAnchor")
-            UserDefaults.standard.set(true, forKey: "workoutDistanceBackfilled_v2")
+            UserDefaults.standard.set(true, forKey: "workoutDistanceBackfilled_v3")
         }
         let anchor: HKQueryAnchor? = UserDefaults.standard.data(forKey: "workoutAnchor")
             .flatMap {
@@ -379,6 +380,16 @@ final class HealthSync {
                 km > 0
             {
                 entry["distanceKm"] = km
+            }
+            // How much active energy Apple ALREADY counted for this window, straight from the
+            // activeEnergyBurned samples. Not the workout's energy — it's the slice of the day's
+            // active total this hour occupies, so the server can swap in its own figure for the
+            // window instead of subtracting it from the daily number (see correctActive).
+            // Sent even when 0 (Watch off ⇒ Apple counted nothing): 0 and "unknown" mean
+            // different things here, and only nil means "this app version didn't report it".
+            if let counted = try await activeEnergyKcal(from: workout.startDate, to: workout.endDate)
+            {
+                entry["appleActiveKcal"] = counted
             }
             if let stats = try await heartRateStats(from: workout.startDate, to: workout.endDate) {
                 if let avg = stats.averageQuantity() {
@@ -439,6 +450,28 @@ final class HealthSync {
                     return cont.resume(throwing: error)
                 }
                 cont.resume(returning: stats?.sumQuantity()?.doubleValue(for: .meterUnit(with: .kilo)))
+            }
+            store.execute(query)
+        }
+    }
+
+    /// Apple's own activeEnergyBurned summed over a workout window — how much of the day's
+    /// active total that window already accounts for. Same sample-summing trick as
+    /// walkRunDistanceKm: authoritative even for imported third-party workouts, which carry
+    /// no statistics of their own. Returns 0 (not nil) when HealthKit reports no samples, so
+    /// the server can tell "Watch was off, Apple counted nothing" apart from "not reported".
+    private func activeEnergyKcal(from start: Date, to end: Date) async throws -> Double? {
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+        return try await withCheckedThrowingContinuation { cont in
+            let query = HKStatisticsQuery(
+                quantityType: activeEnergy,
+                quantitySamplePredicate: predicate, options: .cumulativeSum
+            ) { _, stats, error in
+                if let error {
+                    if (error as? HKError)?.code == .errorNoData { return cont.resume(returning: 0) }
+                    return cont.resume(throwing: error)
+                }
+                cont.resume(returning: stats?.sumQuantity()?.doubleValue(for: .kilocalorie()) ?? 0)
             }
             store.execute(query)
         }

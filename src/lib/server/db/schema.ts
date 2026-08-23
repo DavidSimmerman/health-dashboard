@@ -303,6 +303,13 @@ export const workouts = pgTable(
 		avgHr: real('avg_hr'),
 		maxHr: real('max_hr'),
 		distanceKm: real('distance_km'), // walking/running distance, if recorded (drives the running-miles goal)
+		// Sum of Apple's OWN activeEnergyBurned samples inside this workout's window — i.e. how much
+		// of the day's active total this hour ALREADY occupies. This is NOT the workout's energy;
+		// it's the amount to take OUT of the daily figure before haircutting the rest as passive,
+		// so a workout's own (trusted) number replaces Apple's for that window instead of being
+		// subtracted from it. Null on rows synced before the app sent it → old behaviour.
+		// 0 is meaningful and distinct from null: the Watch was off, so Apple counted nothing.
+		appleActiveKcal: real('apple_active_kcal'),
 		source: text('source'), // HK source bundle id — dedicated trackers (walking pad) are trusted; Apple's own estimates get the haircut
 		createdAt: timestamp('created_at').notNull().defaultNow()
 	},

@@ -34,6 +34,11 @@ export type DayEnergy = {
 export type DayCorrection = {
 	factor: number; // haircut on Apple's PASSIVE active (1 = none)
 	trustedByDate: Map<string, number>; // date → dedicated (workout/pad) kcal, ridden at 1.0
+	// date → how much of Apple's daily active those trusted workouts ALREADY occupy (Apple's own
+	// activeEnergyBurned summed over their windows). Subtracted in place of trustedByDate when
+	// known, so our figure REPLACES Apple's for that window instead of being netted off it.
+	// A date missing here falls back to trustedByDate — the pre-window-sum behaviour.
+	countedByDate: Map<string, number>;
 	todayTargetKcal: number | null; // dynamic calorie target for today's effective intake
 };
 
@@ -93,7 +98,11 @@ export async function deficitDays(
 						.where(sql`${settings.id} = 1`),
 			// Workout kcal, to spot the ones Apple never folded into its daily active total.
 			db
-				.select({ date: sql<string>`${woDate}::text`, kcal: workouts.kcal })
+				.select({
+					date: sql<string>`${woDate}::text`,
+					kcal: workouts.kcal,
+					appleActiveKcal: workouts.appleActiveKcal
+				})
 				.from(workouts)
 				.where(sql`${woDate} between ${fromDate}::date and ${toDate}::date`)
 		]);
@@ -107,10 +116,25 @@ export async function deficitDays(
 	// Apple's daily total — provable when it claims more than the whole day (isUncountedWorkout).
 	// Add those in so the day's active reflects everything that was actually logged. Unconditional:
 	// the raw ledger, the corrected view, and the calibration that learns off them must agree.
+	// Once the iOS app reports the window sum this stops being a heuristic: whatever the workout
+	// claims BEYOND what Apple already booked for its window is exactly what Apple missed. That
+	// also catches the small-manual-entry-on-a-busy-day case the > whole-day test could never see.
 	const uncountedByDate = new Map<string, number>();
 	for (const w of workoutRows) {
-		if (!isUncountedWorkout(w.kcal, activityByDate.get(w.date)?.activeKcal ?? null)) continue;
-		uncountedByDate.set(w.date, (uncountedByDate.get(w.date) ?? 0) + (w.kcal ?? 0));
+		const dayActive = activityByDate.get(w.date)?.activeKcal ?? null;
+		const missed =
+			dayActive == null
+				? // No daily aggregate for this date (older history, or a sync that posted workouts
+					// but not the activity window). The window sum describes a slice of a total that
+					// isn't here, so nothing can already be counted — take the workout at face value,
+					// exactly as isUncountedWorkout(kcal, null) always did.
+					(w.kcal ?? 0)
+				: w.appleActiveKcal != null
+					? Math.max(0, (w.kcal ?? 0) - w.appleActiveKcal)
+					: isUncountedWorkout(w.kcal, dayActive)
+						? (w.kcal ?? 0)
+						: 0;
+		if (missed > 0) uncountedByDate.set(w.date, (uncountedByDate.get(w.date) ?? 0) + missed);
 	}
 
 	const compFmt = new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ });
@@ -184,7 +208,12 @@ export async function deficitDays(
 				: null;
 		const active =
 			correction && rawActive != null
-				? correctActive(rawActive, trusted, correction.factor)
+				? correctActive(
+						rawActive,
+						trusted,
+						correction.factor,
+						correction.countedByDate.get(date) ?? trusted
+					)
 				: rawActive;
 		const burned = bmr != null ? bmr + (active ?? 0) + tef : null;
 		// Predicted intake for the deficit: today, eat at least to target; else actual.

@@ -33,6 +33,7 @@ const WINDOW_DAYS = 30;
 const MODES: GoalMode[] = ['cut', 'recomp', 'lean_bulk'];
 
 type WorkoutRow = {
+	appleActiveKcal: number | null;
 	name: string;
 	kcal: number | null;
 	source: string | null;
@@ -47,13 +48,15 @@ type WorkoutRow = {
 // stand on (strength) or a non-transport type (cycling) stays on the existing path.
 // `weightKg` is the latest weigh-in (weight drifts <a few % over the window — under the
 // formula's own error, and calibration absorbs the residual).
-// `appleActiveKcal` is that day's PRISTINE Apple active total (activity_days, NOT the ledger's
-// augmented one) — a workout claiming more than the whole day was never folded into it (manual
-// entry), so it counts at face value here and deficit.ts adds it to the day (isUncountedWorkout).
+// `dayActiveKcal` is that day's PRISTINE Apple active total (activity_days, NOT the ledger's
+// augmented one) — needed for the legacy whole-day test below, which must never see the
+// post-addition figure or it flip-flops.
+// NB it is a different quantity from `w.appleActiveKcal`, the WINDOW sum for this one workout.
+// Day total vs one workout's slice of it — keep the two apart.
 function trustWorkout(
 	w: WorkoutRow,
 	weightKg: number | null,
-	appleActiveKcal: number | null
+	dayActiveKcal: number | null
 ): { trusted: boolean; kcal: number; estimated: boolean } {
 	// A workout with NO kcal recorded (third-party app that tracked the session but not the
 	// energy) has nothing to trust — riding on its absent number books a 0, which is worse
@@ -77,7 +80,37 @@ function trustWorkout(
 	if (isTrustedWorkoutSource(w.source)) return { trusted: true, kcal: w.kcal, estimated: false };
 	const own = workoutActiveKcal({ name: w.name, distanceKm: w.distanceKm, weightKg });
 	if (own != null) return { trusted: true, kcal: own, estimated: false };
-	return { trusted: isUncountedWorkout(w.kcal, appleActiveKcal), kcal: w.kcal, estimated: false };
+	// Did Apple actually miss any of this workout? With the window sum that is a direct
+	// comparison — kcal beyond what Apple booked for those minutes is exactly what it missed,
+	// and deficit.ts adds precisely that back into the day. It must therefore ride at 1.0 here
+	// too, or the calories we just added get handed straight to the passive haircut. The
+	// whole-day heuristic remains only for rows synced before the app reported the window,
+	// where a small manual entry on a busy day is invisible.
+	// With no daily aggregate the window sum describes a slice of a total that isn't here, so
+	// deficit.ts takes the workout at face value — and it has to ride at 1.0 to match.
+	const appleMissedSome =
+		dayActiveKcal != null && w.appleActiveKcal != null
+			? w.kcal > w.appleActiveKcal
+			: isUncountedWorkout(w.kcal, dayActiveKcal);
+	return { trusted: appleMissedSome, kcal: w.kcal, estimated: false };
+}
+
+// How much of the day's `rawActive` a trusted workout OCCUPIES — the slice correctActive must
+// take out before haircutting the rest. Not the same as what we CREDIT for it. Four cases:
+//   • no daily aggregate → deficit.ts added the workout whole, so it occupies its credited kcal.
+//   • no window sum (pre-v3 row) → credited kcal, i.e. the old behaviour.
+//   • recorded kcal + window sum → max(kcal, window): deficit.ts adds any excess over the window
+//     into rawActive, so it occupies the larger. Using the bare window would let that addition be
+//     credited AND haircut as passive — counted twice.
+//   • estimated (no kcal) + window sum → the window: nothing was added, so it occupies only what
+//     Apple booked for those minutes. This is the third-party-run case.
+function workoutOccupancy(
+	w: WorkoutRow,
+	creditedKcal: number,
+	dayActiveKcal: number | null
+): number {
+	if (dayActiveKcal == null || w.appleActiveKcal == null) return creditedKcal;
+	return Math.max(w.kcal ?? 0, w.appleActiveKcal);
 }
 
 export type WorkoutLite = {
@@ -87,6 +120,7 @@ export type WorkoutLite = {
 	startedAt: string;
 	trusted: boolean;
 	estimated: boolean; // kcal is ours, not the tracker's — the workout recorded no energy
+	appleWindowKcal: number | null; // what Apple already counted for this window (null pre-sync)
 };
 
 const mean = (xs: number[]): number | null =>
@@ -101,7 +135,7 @@ type SettingsRow = typeof settings.$inferSelect;
 export type EnergyContext = {
 	today: string;
 	mode: GoalMode;
-	correction: DayCorrection; // { factor, trustedByDate, todayTargetKcal }
+	correction: DayCorrection; // { factor, trustedByDate, countedByDate, todayTargetKcal }
 	// Calibration / maintenance
 	factor: number;
 	maintenanceKcal: number | null;
@@ -123,7 +157,7 @@ export type EnergyContext = {
 	avgTrustedKcal: number | null;
 	// Reusable so callers don't re-query
 	windowLedger: DayEnergy[]; // RAW, fillBmrGaps'd, [today-30 … today]
-	woByDate: Map<string, { kcal: number; list: WorkoutLite[] }>;
+	woByDate: Map<string, { kcal: number; counted: number; list: WorkoutLite[] }>;
 };
 
 export async function resolveCorrection(settingsRow?: SettingsRow | null): Promise<EnergyContext> {
@@ -148,6 +182,7 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 				kcal: workouts.kcal,
 				source: workouts.source,
 				distanceKm: workouts.distanceKm,
+				appleActiveKcal: workouts.appleActiveKcal,
 				minutes: WORKOUT_MINUTES,
 				time: sql<string>`to_char((${workouts.startedAt} at time zone 'UTC' at time zone ${APP_TZ}), 'FMHH12:MI AM')`,
 				startedAt: sql<string>`${workouts.startedAt}::text`
@@ -174,19 +209,18 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	// transport active-kcal (distance × weight, out of the haircut pool); dedicated third-party
 	// trackers (pad) still ride on their own kcal; everything else follows the source rule.
 	// Null kcal counts as 0 trusted.
-	const woByDate = new Map<string, { kcal: number; list: WorkoutLite[] }>();
+	const woByDate = new Map<string, { kcal: number; counted: number; list: WorkoutLite[] }>();
 	const appleActiveByDate = new Map(appleActiveRows.map((a) => [a.date, a.activeKcal]));
 	for (const w of woRows) {
-		const { trusted, kcal, estimated } = trustWorkout(
-			w,
-			weightKg,
-			appleActiveByDate.get(w.date) ?? null
-		);
-		const e = woByDate.get(w.date) ?? { kcal: 0, list: [] };
+		const dayActive = appleActiveByDate.get(w.date) ?? null;
+		const { trusted, kcal, estimated } = trustWorkout(w, weightKg, dayActive);
+		const e = woByDate.get(w.date) ?? { kcal: 0, counted: 0, list: [] };
 		e.kcal += trusted ? kcal : 0; // only trusted kcal count toward the carve-out
+		e.counted += trusted ? workoutOccupancy(w, kcal, dayActive) : 0;
 		e.list.push({
 			name: w.name,
 			kcal: trusted ? Math.round(kcal) : w.kcal, // show the number we actually use
+			appleWindowKcal: w.appleActiveKcal,
 			time: w.time,
 			startedAt: w.startedAt,
 			trusted,
@@ -195,6 +229,7 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 		woByDate.set(w.date, e);
 	}
 	const trustedByDate = new Map([...woByDate].map(([d, v]) => [d, v.kcal]));
+	const countedByDate = new Map([...woByDate].map(([d, v]) => [d, v.counted]));
 
 	// Correction factor from COMPLETED, logged days (today's partial excluded).
 	// Vacation days don't train it — trip food is guesswork.
@@ -206,18 +241,30 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	const avgTef = mean(completed.map((d) => d.tefKcal));
 	const avgRawActive = mean(completed.map((d) => d.activeKcal ?? 0));
 	const avgTrusted = mean(completed.map((d) => trustedByDate.get(d.date) ?? 0));
+	// The denominator the correction actually uses — see activeCorrectionFactor. Must be the
+	// same quantity correctActive subtracts, or the factor is fitted to a different equation.
+	const avgCounted = mean(
+		completed.map((d) => countedByDate.get(d.date) ?? trustedByDate.get(d.date) ?? 0)
+	);
 	const realActiveAvg =
 		insights.calibratedTdee != null && avgBmr != null && avgTef != null
 			? insights.calibratedTdee - avgBmr - avgTef
 			: null;
 	const factor =
 		realActiveAvg != null && avgRawActive != null && avgTrusted != null
-			? activeCorrectionFactor(realActiveAvg, avgRawActive, avgTrusted)
+			? activeCorrectionFactor(realActiveAvg, avgRawActive, avgTrusted, avgCounted ?? avgTrusted)
 			: 1;
 
 	// Avg corrected active over completed days (already inside calibrated maintenance).
 	const avgCorrectedActive = mean(
-		completed.map((d) => correctActive(d.activeKcal ?? 0, trustedByDate.get(d.date) ?? 0, factor))
+		completed.map((d) =>
+			correctActive(
+				d.activeKcal ?? 0,
+				trustedByDate.get(d.date) ?? 0,
+				factor,
+				countedByDate.get(d.date) ?? trustedByDate.get(d.date) ?? 0
+			)
+		)
 	);
 
 	// Maintenance + per-mode target delta (recomp needs no body data, lean_bulk only
@@ -242,7 +289,12 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	const correctedBurnToday =
 		todayEntry?.bmrKcal != null
 			? todayEntry.bmrKcal +
-				correctActive(todayEntry.activeKcal ?? 0, trustedByDate.get(today) ?? 0, factor) +
+				correctActive(
+					todayEntry.activeKcal ?? 0,
+					trustedByDate.get(today) ?? 0,
+					factor,
+					countedByDate.get(today) ?? trustedByDate.get(today) ?? 0
+				) +
 				todayEntry.tefKcal
 			: null;
 	// A break day is a maintenance day: today's delta is 0, which flows through every
@@ -292,7 +344,12 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 			deficitKcal:
 				d.bmrKcal != null
 					? d.bmrKcal +
-						correctActive(d.activeKcal ?? 0, trustedByDate.get(d.date) ?? 0, factor) +
+						correctActive(
+							d.activeKcal ?? 0,
+							trustedByDate.get(d.date) ?? 0,
+							factor,
+							countedByDate.get(d.date) ?? trustedByDate.get(d.date) ?? 0
+						) +
 						d.tefKcal -
 						d.intakeKcal
 					: null,
@@ -323,7 +380,7 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	return {
 		today,
 		mode,
-		correction: { factor, trustedByDate, todayTargetKcal: stableTargetKcal },
+		correction: { factor, trustedByDate, countedByDate, todayTargetKcal: stableTargetKcal },
 		factor,
 		maintenanceKcal,
 		maintenanceSource,
@@ -354,11 +411,13 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 // Trusted (dedicated workout) kcal per local day over [from, to] — so a requested
 // historical range gets its OWN workout carve-out, not just the 30-day calibration
 // window's (older days would otherwise haircut real workout burn as passive).
+// Returns both halves of the carve-out: what we CREDIT (trusted) and how much of Apple's day
+// those workouts already OCCUPY (counted) — see correctActive.
 async function trustedWorkoutsByDate(
 	from: string,
 	to: string,
 	weightKg: number | null
-): Promise<Map<string, number>> {
+): Promise<{ trustedByDate: Map<string, number>; countedByDate: Map<string, number> }> {
 	const woDate = sql<string>`(${workouts.startedAt} at time zone 'UTC' at time zone ${APP_TZ})::date`;
 	const [rows, activity] = await Promise.all([
 		db
@@ -368,6 +427,7 @@ async function trustedWorkoutsByDate(
 				kcal: workouts.kcal,
 				source: workouts.source,
 				distanceKm: workouts.distanceKm,
+				appleActiveKcal: workouts.appleActiveKcal,
 				minutes: WORKOUT_MINUTES
 			})
 			.from(workouts)
@@ -379,12 +439,19 @@ async function trustedWorkoutsByDate(
 			.where(and(gte(activityDays.date, from), lte(activityDays.date, to)))
 	]);
 	const appleActiveByDate = new Map(activity.map((a) => [a.date, a.activeKcal]));
-	const m = new Map<string, number>();
+	const trustedByDate = new Map<string, number>();
+	const countedByDate = new Map<string, number>();
 	for (const r of rows) {
-		const { trusted, kcal } = trustWorkout(r, weightKg, appleActiveByDate.get(r.date) ?? null);
-		if (trusted) m.set(r.date, (m.get(r.date) ?? 0) + kcal);
+		const dayActive = appleActiveByDate.get(r.date) ?? null;
+		const { trusted, kcal } = trustWorkout(r, weightKg, dayActive);
+		if (!trusted) continue;
+		trustedByDate.set(r.date, (trustedByDate.get(r.date) ?? 0) + kcal);
+		countedByDate.set(
+			r.date,
+			(countedByDate.get(r.date) ?? 0) + workoutOccupancy(r, kcal, dayActive)
+		);
 	}
-	return m;
+	return { trustedByDate, countedByDate };
 }
 
 export async function correctedDeficitDays(
@@ -396,10 +463,14 @@ export async function correctedDeficitDays(
 	// kcal must cover the ACTUAL requested range (which may predate that window). The
 	// workout formula needs the latest weight the context already resolved.
 	const ctx = await resolveCorrection(opts?.settingsRow);
-	const trustedByDate = await trustedWorkoutsByDate(fromDate, toDate, ctx.weightKg);
+	const { trustedByDate, countedByDate } = await trustedWorkoutsByDate(
+		fromDate,
+		toDate,
+		ctx.weightKg
+	);
 	return deficitDays(fromDate, toDate, {
 		settingsRow: opts?.settingsRow,
-		correction: { ...ctx.correction, trustedByDate }
+		correction: { ...ctx.correction, trustedByDate, countedByDate }
 	});
 }
 
@@ -423,7 +494,8 @@ export async function energyBreakdown(): Promise<EnergyBreakdown> {
 	// raw→corrected display (the page shows both).
 	const days: DayBreakdown[] = ctx.windowLedger.map((d) => {
 		const trustedKcal = ctx.woByDate.get(d.date)?.kcal ?? 0;
-		const ca = correctActive(d.activeKcal ?? 0, trustedKcal, ctx.factor);
+		const countedKcal = ctx.woByDate.get(d.date)?.counted ?? trustedKcal;
+		const ca = correctActive(d.activeKcal ?? 0, trustedKcal, ctx.factor, countedKcal);
 		const cb = d.bmrKcal != null ? d.bmrKcal + ca + d.tefKcal : null;
 		return {
 			...d,

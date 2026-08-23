@@ -178,10 +178,14 @@
 				<div class="ledger-row" style="padding-left: 12px; font-size: 12px;">
 					<span style="color: var(--color-text-subtle);"
 						>↳ {w.name} · {w.time}
-						{#if w.estimated}<span style="color: var(--color-amber, #fbbf24);"
-								>our est. — no kcal recorded</span
+						{#if w.estimated}<span style="color: var(--color-amber, #fbbf24);">our est.</span
 							>{:else if w.trusted}<span style="color: var(--color-mint, #34d399);">trusted</span
-							>{:else}<span style="color: var(--color-text-subtle);">Apple est.</span>{/if}</span
+							>{:else}<span style="color: var(--color-text-subtle);">Apple est.</span
+							>{/if}{#if w.appleWindowKcal != null}
+							<!-- What Apple already had for this window — the number actually taken out of
+							     "logged" before the rest is haircut. Without it the jump from logged to
+							     corrected looks like it doesn't add up. -->
+							· Apple had {Math.round(w.appleWindowKcal)} here{/if}</span
 					>
 					<b style="font-weight: 500;">{num(w.kcal)}</b>
 				</div>

@@ -302,4 +302,68 @@ assert.equal(isTrustedWorkoutSource('com.apple.workout.build'), false);
 	);
 }
 
+// countedKcal: what APPLE already booked for the workout's window — NOT our number for it.
+// Subtracting ours overstates the passive remainder and haircuts real workout energy as couch time.
+{
+	const daily = 735.3,
+		ours = 514.7,
+		f = 0.4;
+	// Apple credited ~600 for the run window (its own rate on a comparable Watch-tracked run),
+	// so only ~135 of the day is genuinely passive — not the 220 that subtracting ours implies.
+	const withWindow = correctActive(daily, ours, f, 600);
+	assert.equal(withWindow, ours + f * (daily - 600));
+	const assumingOurs = correctActive(daily, ours, f);
+	assert(
+		assumingOurs > withWindow,
+		`assuming our own number over-credits: ${assumingOurs} vs ${withWindow}`
+	);
+	assert.equal(Math.round(assumingOurs - withWindow), 34); // the real over-credit on 8/22
+	// Omitting countedKcal reproduces the old behaviour exactly — pre-window-sum rows stay safe.
+	assert.equal(correctActive(daily, ours, f), correctActive(daily, ours, f, ours));
+	// Watch OFF for the workout: Apple booked 0 for the window, so the whole day outside it is
+	// passive and our figure lands ON TOP of the haircut rather than being netted out of it.
+	assert.equal(correctActive(200, 500, 0.5, 0), 500 + 0.5 * 200);
+	// 0 must NOT behave like "absent" — telling them apart is the entire point of the parameter.
+	assert(correctActive(200, 500, 0.5, 0) > correctActive(200, 500, 0.5));
+	// Apple booked more for the window than the day holds ⇒ passive floors at 0, never negative.
+	assert.equal(correctActive(500, 400, 0.5, 900), 400);
+
+	// A manual workout Apple missed is ADDED to rawActive, so its occupancy is max(kcal, window)
+	// — not the window. Using the bare window would credit it AND haircut it: double-counted.
+	// 500 kcal workout, Watch off (window 0), Apple's day 200 ⇒ raw 700, occupancy 500.
+	assert.equal(correctActive(200 + 500, 500, 0.5, Math.max(500, 0)), 500 + 0.5 * 200);
+	assert(
+		correctActive(700, 500, 0.5, 0) > correctActive(700, 500, 0.5, 500),
+		'passing the bare window here would double-count the addition'
+	);
+	// Partly counted: Apple booked 300 of a 500 workout, so 200 was added ⇒ raw 400, occupancy 500.
+	assert.equal(correctActive(200 + 200, 500, 0.5, Math.max(500, 300)), 500);
+	// SMALL manual entry on a BUSY day — invisible to the whole-day heuristic (500 < 1000), but
+	// obvious against the window (500 > 100). Apple booked 100 of it, so 400 is added back and the
+	// full 500 must ride at 1.0; only Apple's genuine non-workout 900 is haircut.
+	assert.equal(correctActive(1000 + 400, 500, 0.5, Math.max(500, 100)), 500 + 0.5 * 900);
+	assert.equal(isUncountedWorkout(500, 1000), false); // the old test could never have caught it
+	// No daily aggregate at all (older history / a sync that posted workouts but not activity):
+	// the window sum slices a total that isn't there, so the workout counts whole and rides at
+	// 1.0 — same as before. Occupancy is its credited kcal, NOT the window.
+	assert.equal(correctActive(0 + 500, 500, 0.5, 500), 500);
+	assert.equal(isUncountedWorkout(500, null), true); // unchanged for the no-aggregate case
+
+	// The factor must be fitted to the SAME equation the correction applies:
+	// real = trusted + f × (raw − counted). Training on trusted while correcting on counted
+	// silently biases every day whose window sum differs from what we credit.
+	{
+		const real = 600,
+			raw = 900,
+			trusted = 300,
+			counted = 400;
+		const f = activeCorrectionFactor(real, raw, trusted, counted);
+		assert.equal(f, (real - trusted) / (raw - counted));
+		// Round-trips: applying the fitted factor reproduces the real active it was fitted to.
+		assert(Math.abs(correctActive(raw, trusted, f, counted) - real) < 1e-9);
+		// Omitted ⇒ identical to the old three-arg behaviour.
+		assert.equal(activeCorrectionFactor(600, 900, 300), activeCorrectionFactor(600, 900, 300, 300));
+	}
+}
+
 console.log('energy.selfcheck: all assertions passed ✓');

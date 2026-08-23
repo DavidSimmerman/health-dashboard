@@ -17,6 +17,7 @@ type WorkoutIn = {
 	avgHr?: number | null;
 	maxHr?: number | null;
 	distanceKm?: number | null;
+	appleActiveKcal?: number | null; // Apple's activeEnergyBurned summed over the workout window
 	source?: string | null; // HK source bundle id (Apple Watch vs dedicated tracker)
 };
 
@@ -55,6 +56,7 @@ function parseWorkout(raw: unknown): WorkoutIn {
 		avgHr: num(r.avgHr, 20, 250, 'avgHr'),
 		maxHr: num(r.maxHr, 20, 260, 'maxHr'),
 		distanceKm: num(r.distanceKm, 0, 1000, 'distanceKm'),
+		appleActiveKcal: num(r.appleActiveKcal, 0, 20_000, 'appleActiveKcal'),
 		source: typeof r.source === 'string' ? r.source : null
 	};
 }
@@ -95,6 +97,7 @@ export async function POST({ request }) {
 					avgHr: w.avgHr,
 					maxHr: w.maxHr,
 					distanceKm: w.distanceKm,
+					appleActiveKcal: w.appleActiveKcal,
 					source: w.source
 				}
 			])
@@ -116,6 +119,11 @@ export async function POST({ request }) {
 					avgHr: sql`excluded.avg_hr`,
 					maxHr: sql`excluded.max_hr`,
 					distanceKm: sql`excluded.distance_km`,
+					// Keep a previously backfilled window sum when the payload omits it — an older
+					// app build resending a workout would otherwise wipe it back to NULL, and the
+					// one-shot v3 backfill would never restore it. COALESCE still accepts a real
+					// 0 ("Watch was off"), since 0 is not NULL.
+					appleActiveKcal: sql`coalesce(excluded.apple_active_kcal, ${workouts.appleActiveKcal})`,
 					source: sql`excluded.source`
 				}
 			});
