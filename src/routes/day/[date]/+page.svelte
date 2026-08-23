@@ -356,7 +356,14 @@
 							</p>
 						</div>
 						{#if w.kcal != null}
-							<p class="shrink-0 text-sm font-semibold text-white">{Math.round(w.kcal)} kcal</p>
+							<p class="shrink-0 text-right text-sm font-semibold text-white">
+								{Math.round(w.kcal)} kcal
+								{#if w.estimated}
+									<span class="block text-xs font-normal" style="color: var(--color-text-subtle);"
+										>estimated</span
+									>
+								{/if}
+							</p>
 						{/if}
 					</div>
 				{/each}

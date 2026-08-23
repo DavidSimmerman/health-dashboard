@@ -18,8 +18,16 @@ import {
 	isTrustedWorkoutSource,
 	isUncountedWorkout,
 	workoutActiveKcal,
+	fallbackWorkoutKcal,
 	type GoalMode
 } from '$lib/energy';
+
+// Workout duration in minutes, null when the row has no end. Cast off numeric — the pg
+// driver hands `extract(...)` back as a string otherwise, which would silently poison the
+// MET arithmetic.
+const WORKOUT_MINUTES = sql<
+	number | null
+>`(extract(epoch from (${workouts.endedAt} - ${workouts.startedAt})) / 60)::double precision`;
 
 const WINDOW_DAYS = 30;
 const MODES: GoalMode[] = ['cut', 'recomp', 'lean_bulk'];
@@ -29,6 +37,7 @@ type WorkoutRow = {
 	kcal: number | null;
 	source: string | null;
 	distanceKm: number | null;
+	minutes: number | null;
 };
 
 // Trusted (out-of-haircut) active kcal for one workout. Dedicated trackers (walking pad,
@@ -45,11 +54,30 @@ function trustWorkout(
 	w: WorkoutRow,
 	weightKg: number | null,
 	appleActiveKcal: number | null
-): { trusted: boolean; kcal: number } {
-	if (isTrustedWorkoutSource(w.source)) return { trusted: true, kcal: w.kcal ?? 0 };
+): { trusted: boolean; kcal: number; estimated: boolean } {
+	// A workout with NO kcal recorded (third-party app that tracked the session but not the
+	// energy) has nothing to trust — riding on its absent number books a 0, which is worse
+	// than nothing: it hands the workout's real burn to the passive haircut. Estimate it, and
+	// trust the estimate. Trusted, NOT added: the Watch was on the wrist (that's where the HR
+	// came from), so Apple's activeEnergyBurned already covers the window — carving it out of
+	// the haircut is the correction that was actually missing, and adding on top would double
+	// count. The no-Watch case still works out: correctActive floors passive at 0, so an
+	// estimate LARGER than Apple's whole day simply becomes the day's active.
+	if (w.kcal == null) {
+		const est = fallbackWorkoutKcal({
+			name: w.name,
+			distanceKm: w.distanceKm,
+			minutes: w.minutes,
+			weightKg
+		});
+		return est != null
+			? { trusted: true, kcal: est, estimated: true }
+			: { trusted: false, kcal: 0, estimated: false }; // no weigh-in / no duration → nothing to claim
+	}
+	if (isTrustedWorkoutSource(w.source)) return { trusted: true, kcal: w.kcal, estimated: false };
 	const own = workoutActiveKcal({ name: w.name, distanceKm: w.distanceKm, weightKg });
-	if (own != null) return { trusted: true, kcal: own };
-	return { trusted: isUncountedWorkout(w.kcal, appleActiveKcal), kcal: w.kcal ?? 0 };
+	if (own != null) return { trusted: true, kcal: own, estimated: false };
+	return { trusted: isUncountedWorkout(w.kcal, appleActiveKcal), kcal: w.kcal, estimated: false };
 }
 
 export type WorkoutLite = {
@@ -58,6 +86,7 @@ export type WorkoutLite = {
 	time: string;
 	startedAt: string;
 	trusted: boolean;
+	estimated: boolean; // kcal is ours, not the tracker's — the workout recorded no energy
 };
 
 const mean = (xs: number[]): number | null =>
@@ -119,6 +148,7 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 				kcal: workouts.kcal,
 				source: workouts.source,
 				distanceKm: workouts.distanceKm,
+				minutes: WORKOUT_MINUTES,
 				time: sql<string>`to_char((${workouts.startedAt} at time zone 'UTC' at time zone ${APP_TZ}), 'FMHH12:MI AM')`,
 				startedAt: sql<string>`${workouts.startedAt}::text`
 			})
@@ -147,7 +177,11 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	const woByDate = new Map<string, { kcal: number; list: WorkoutLite[] }>();
 	const appleActiveByDate = new Map(appleActiveRows.map((a) => [a.date, a.activeKcal]));
 	for (const w of woRows) {
-		const { trusted, kcal } = trustWorkout(w, weightKg, appleActiveByDate.get(w.date) ?? null);
+		const { trusted, kcal, estimated } = trustWorkout(
+			w,
+			weightKg,
+			appleActiveByDate.get(w.date) ?? null
+		);
 		const e = woByDate.get(w.date) ?? { kcal: 0, list: [] };
 		e.kcal += trusted ? kcal : 0; // only trusted kcal count toward the carve-out
 		e.list.push({
@@ -155,7 +189,8 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 			kcal: trusted ? Math.round(kcal) : w.kcal, // show the number we actually use
 			time: w.time,
 			startedAt: w.startedAt,
-			trusted
+			trusted,
+			estimated
 		});
 		woByDate.set(w.date, e);
 	}
@@ -332,7 +367,8 @@ async function trustedWorkoutsByDate(
 				name: workouts.name,
 				kcal: workouts.kcal,
 				source: workouts.source,
-				distanceKm: workouts.distanceKm
+				distanceKm: workouts.distanceKm,
+				minutes: WORKOUT_MINUTES
 			})
 			.from(workouts)
 			.where(sql`${woDate} between ${from}::date and ${to}::date`),
@@ -392,7 +428,10 @@ export async function energyBreakdown(): Promise<EnergyBreakdown> {
 		return {
 			...d,
 			trustedKcal: Math.round(trustedKcal),
-			correctedActiveKcal: d.activeKcal != null ? Math.round(ca) : null,
+			// Same account-opening rule as deficit.ts: trusted kcal alone are evidence of active
+			// energy, so a day whose Apple aggregate never synced still shows its corrected
+			// active instead of a dash that contradicts the burn it's already counted in.
+			correctedActiveKcal: d.activeKcal != null || trustedKcal > 0 ? Math.round(ca) : null,
 			correctedBurnedKcal: cb != null ? Math.round(cb) : null,
 			correctedDeficitKcal: cb != null ? Math.round(cb - d.intakeKcal) : null,
 			workouts: ctx.woByDate.get(d.date)?.list ?? []

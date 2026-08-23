@@ -172,13 +172,19 @@ export async function deficitDays(
 		// Apple's daily active + any workout kcal it never included (null activeKcal but a workout
 		// present still counts — the workout is real data even if the daily aggregate didn't sync).
 		const uncounted = uncountedByDate.get(date) ?? 0;
+		// Trusted kcal (pad / distance / estimated workouts) are themselves evidence the day had
+		// active energy, so they alone are enough to open the day's account. Without this a day
+		// whose daily aggregate never synced stays null and drops the workout from burn entirely —
+		// correctActive would have counted it, but it was never reached. Correction-only: on the
+		// raw path trusted is always 0, so `rawActive` keeps its old meaning.
+		const trusted = correction?.trustedByDate.get(date) ?? 0;
 		const rawActive =
-			activity?.activeKcal != null || uncounted > 0
+			activity?.activeKcal != null || uncounted > 0 || trusted > 0
 				? (activity?.activeKcal ?? 0) + uncounted
 				: null;
 		const active =
 			correction && rawActive != null
-				? correctActive(rawActive, correction.trustedByDate.get(date) ?? 0, correction.factor)
+				? correctActive(rawActive, trusted, correction.factor)
 				: rawActive;
 		const burned = bmr != null ? bmr + (active ?? 0) + tef : null;
 		// Predicted intake for the deficit: today, eat at least to target; else actual.

@@ -178,7 +178,9 @@
 				<div class="ledger-row" style="padding-left: 12px; font-size: 12px;">
 					<span style="color: var(--color-text-subtle);"
 						>↳ {w.name} · {w.time}
-						{#if w.trusted}<span style="color: var(--color-mint, #34d399);">trusted</span
+						{#if w.estimated}<span style="color: var(--color-amber, #fbbf24);"
+								>our est. — no kcal recorded</span
+							>{:else if w.trusted}<span style="color: var(--color-mint, #34d399);">trusted</span
 							>{:else}<span style="color: var(--color-text-subtle);">Apple est.</span>{/if}</span
 					>
 					<b style="font-weight: 500;">{num(w.kcal)}</b>

@@ -334,3 +334,61 @@ export function workoutActiveKcal(w: {
 	if (costPerKgKm == null) return null; // e.g. cycling — distance is a poor energy proxy
 	return dist * wt * costPerKgKm;
 }
+
+// ── Workouts with NO energy recorded ─────────────────────────────────────────
+// A third-party app can log a session to HealthKit without any calories (no workout
+// kcal, no activeEnergyBurned samples of its own). Those rows would otherwise count as
+// zero — worse than nothing, because a 0 makes the whole day look passive and hands the
+// real burn to the haircut. So estimate them: distance first (workoutActiveKcal, the
+// grounded cost-of-transport number above), and only when there's no distance to stand
+// on, MET × duration.
+//
+// MET = Compendium of Physical Activities intensity, in multiples of resting. Minus 1 to
+// get the NET cost — the same "active kcal" units everything else here uses, and what
+// Apple's activeEnergyBurned means. kcal = (MET − 1) × kg × hours.
+// ponytail: fixed table, no intensity/HR/fitness adjustment — a hard interval session and
+// a lazy one on the same machine estimate identically. It's a floor-quality guess used
+// ONLY where the alternative is 0. Upgrade path (better than any formula here): have the
+// iOS sync post the summed activeEnergyBurned samples inside the workout's window — the
+// Watch's own measurement, the same trick walkRunDistanceKm already uses.
+const MET_BY_ACTIVITY: Array<[RegExp, number]> = [
+	[/run|jog/, 9.8],
+	[/hiit|interval|cross ?train/, 8.0],
+	[/cycl|bike|spin/, 7.5],
+	[/swim|row|paddle|elliptical/, 7.0],
+	[/stair|climb/, 6.0],
+	[/strength|weight|lift|functional|core/, 5.0],
+	[/walk|hik/, 3.5],
+	[/yoga|stretch|pilates|barre|mind/, 2.8]
+];
+const DEFAULT_MET = 4.0; // unknown activity: deliberately modest, not heroic
+
+export function metWorkoutKcal(w: {
+	name: string;
+	minutes: number | null;
+	weightKg: number | null;
+}): number | null {
+	const { name, minutes, weightKg: wt } = w;
+	if (minutes == null || wt == null || minutes <= 0 || wt <= 0) return null;
+	// A session left running (forgotten stop) would otherwise invent thousands of kcal and
+	// silently inflate the eat-to target. Cap the duration that can be claimed.
+	const hours = Math.min(minutes, 240) / 60;
+	const t = name.toLowerCase();
+	const met = MET_BY_ACTIVITY.find(([re]) => re.test(t))?.[1] ?? DEFAULT_MET;
+	return (met - 1) * wt * hours;
+}
+
+// THE estimate for a workout that recorded no energy: measured distance first, MET ×
+// duration as the fallback. One entry point so the ledger and the day view can't drift.
+// Null when there's nothing to estimate from (no weigh-in, or no duration and no distance).
+export function fallbackWorkoutKcal(w: {
+	name: string;
+	distanceKm: number | null;
+	minutes: number | null;
+	weightKg: number | null;
+}): number | null {
+	return (
+		workoutActiveKcal({ name: w.name, distanceKm: w.distanceKm, weightKg: w.weightKg }) ??
+		metWorkoutKcal({ name: w.name, minutes: w.minutes, weightKg: w.weightKg })
+	);
+}

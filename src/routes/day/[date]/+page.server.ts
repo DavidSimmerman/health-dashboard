@@ -14,7 +14,7 @@ import {
 import { correctedDeficitDays } from '$lib/server/energyBreakdown';
 import { fillBmrGaps } from '$lib/server/projections';
 import { APP_TZ, todayLabel } from '$lib/server/day';
-import { addDays } from '$lib/energy';
+import { addDays, fallbackWorkoutKcal } from '$lib/energy';
 import { bolusableForLoggedEntry } from '$lib/netCarbs';
 import { getFiberMode } from '$lib/server/prefs';
 import { loadIsBreakDay, toggleBreakDay } from '$lib/server/breakDays';
@@ -94,7 +94,8 @@ export async function load({ params }) {
 					endedAt: workouts.endedAt,
 					kcal: workouts.kcal,
 					avgHr: workouts.avgHr,
-					maxHr: workouts.maxHr
+					maxHr: workouts.maxHr,
+					distanceKm: workouts.distanceKm
 				})
 				.from(workouts)
 				.where(sql`${workoutDate} = ${date}::date`)
@@ -152,12 +153,31 @@ export async function load({ params }) {
 		return { ...e, bolusableCarbsG: b.bolusableCarbsG, bolusableLowConfidence: b.lowConfidence };
 	});
 
+	// A workout the tracker logged without any calories shows OUR estimate rather than a blank,
+	// via the same helper the energy ledger trusts, so the two can't drift apart in METHOD.
+	// ponytail: the ledger scales by the CURRENT trend weight (one value across its window);
+	// this uses the weigh-in as of the day being viewed, so an old day can differ by the weight
+	// drift since — a couple of percent, under the estimate's own error. Not worth a second
+	// resolveCorrection() pass on every day-page load; revisit if the numbers ever visibly split.
+	const workoutsWithKcal = workoutRows.map((w) => ({
+		...w,
+		estimated: w.kcal == null,
+		kcal:
+			w.kcal ??
+			fallbackWorkoutKcal({
+				name: w.name,
+				distanceKm: w.distanceKm,
+				minutes: w.endedAt ? (w.endedAt.getTime() - w.startedAt.getTime()) / 60_000 : null,
+				weightKg: weighIn?.weightKg ?? null
+			})
+	}));
+
 	return {
 		date,
 		day,
 		entries: entriesWithBolusable,
 		weighIn: weighIn ?? null,
-		workouts: workoutRows,
+		workouts: workoutsWithKcal,
 		metrics,
 		glucose,
 		insulin,

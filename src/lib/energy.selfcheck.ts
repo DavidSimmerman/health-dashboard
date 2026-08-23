@@ -19,7 +19,9 @@ import {
 	deficitBalance,
 	isTrustedWorkoutSource,
 	isUncountedWorkout,
-	workoutActiveKcal
+	workoutActiveKcal,
+	metWorkoutKcal,
+	fallbackWorkoutKcal
 } from './energy.ts';
 
 // linearRegression recovers a known line y = 2x + 1
@@ -240,6 +242,64 @@ assert.equal(isTrustedWorkoutSource('com.apple.workout.build'), false);
 	// A counted (Watch) workout is already inside the day's total: it only carves ITSELF out of
 	// the haircut — 836 at face value + half of the remaining 439 passive. No addition.
 	assert.equal(correctActive(1275, 836, 0.5), 836 + 0.5 * 439);
+}
+
+// Workout logged with NO energy recorded (third-party app tracked the session, not the calories).
+{
+	// The motivating case: a 56-min run at 66.9 kg logged by an app that wrote no kcal.
+	// With distance, the grounded cost-of-transport number wins over the MET table.
+	assert.equal(workoutActiveKcal({ name: 'Run', distanceKm: 8, weightKg: 66.9 }), 8 * 66.9 * 1.0);
+	// No distance to stand on → MET × duration, NET of rest ((MET − 1), not MET).
+	const run = metWorkoutKcal({ name: 'Run', minutes: 55.6, weightKg: 66.9 });
+	assert(run != null && Math.abs(run - (9.8 - 1) * 66.9 * (55.6 / 60)) < 1e-9, `run ${run}`);
+	assert(run! > 500 && run! < 600, `a hard 56-min run should land ~545 kcal, got ${run}`);
+	// Activity matched case-insensitively; unknown names get the modest default, not the max.
+	assert.equal(
+		metWorkoutKcal({ name: 'STRENGTH TRAINING', minutes: 60, weightKg: 70 }),
+		(5.0 - 1) * 70 * 1
+	);
+	const unknown = metWorkoutKcal({ name: 'Kitesurfing', minutes: 60, weightKg: 70 });
+	assert.equal(unknown, (4.0 - 1) * 70 * 1);
+	assert(unknown! < metWorkoutKcal({ name: 'Run', minutes: 60, weightKg: 70 })!);
+	// Missing inputs → null (never a bogus 0 that would read as "no burn").
+	assert.equal(metWorkoutKcal({ name: 'Run', minutes: null, weightKg: 70 }), null);
+	assert.equal(metWorkoutKcal({ name: 'Run', minutes: 60, weightKg: null }), null);
+	assert.equal(metWorkoutKcal({ name: 'Run', minutes: 0, weightKg: 70 }), null);
+	assert.equal(metWorkoutKcal({ name: 'Run', minutes: -5, weightKg: 70 }), null);
+	// A workout left running all night is capped at 4h, not billed for 14.
+	assert.equal(
+		metWorkoutKcal({ name: 'Walk', minutes: 14 * 60, weightKg: 70 }),
+		metWorkoutKcal({ name: 'Walk', minutes: 240, weightKg: 70 })
+	);
+	// The estimate is TRUSTED (out of the haircut), not ADDED: the Watch was on the wrist, so
+	// the run's burn is already inside Apple's daily active. 717 total, ~545 of it the run.
+	assert.equal(correctActive(717.6, 545, 0.5), 545 + 0.5 * (717.6 - 545));
+	// Before the fix this booked 0 trusted kcal and haircut the whole day — strictly worse.
+	assert(correctActive(717.6, 545, 0.5) > correctActive(717.6, 0, 0.5));
+	// Ran without the Watch: the estimate exceeds Apple's whole day, so it BECOMES the day's
+	// active (passive floors at 0) rather than double-counting or blowing up.
+	assert.equal(correctActive(300, 545, 0.5), 545);
+	// …and when the daily aggregate never synced at all, deficit.ts opens the day at 0 raw so
+	// the trusted estimate still lands in burn. That reduces to exactly the estimate — the
+	// workout must never be silently dropped just because Apple's daily row is missing.
+	assert.equal(correctActive(0, 545, 0.5), 545);
+	// fallbackWorkoutKcal prefers measured distance over the MET guess, and is null-safe.
+	assert.equal(
+		fallbackWorkoutKcal({ name: 'Run', distanceKm: 8, minutes: 55.6, weightKg: 66.9 }),
+		8 * 66.9
+	);
+	assert.equal(
+		fallbackWorkoutKcal({ name: 'Strength Training', distanceKm: null, minutes: 60, weightKg: 70 }),
+		(5.0 - 1) * 70
+	);
+	assert.equal(
+		fallbackWorkoutKcal({ name: 'Run', distanceKm: null, minutes: null, weightKg: 66.9 }),
+		null
+	);
+	assert.equal(
+		fallbackWorkoutKcal({ name: 'Run', distanceKm: 8, minutes: 55, weightKg: null }),
+		null
+	);
 }
 
 console.log('energy.selfcheck: all assertions passed ✓');
