@@ -3,6 +3,7 @@
 	import favicon from '$lib/assets/favicon.png';
 	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
+	import { updated } from '$app/state';
 	import BottomNav from '$lib/components/BottomNav.svelte';
 	import CaptureSheet from '$lib/components/CaptureSheet.svelte';
 	import ChatSheet from '$lib/components/ChatSheet.svelte';
@@ -21,7 +22,14 @@
 		// scan survives — the hard webView.reload() this replaced used to kill them
 		// mid-flow. Returns true so the native side knows the hook exists.
 		(window as unknown as { __hmRefresh?: () => boolean }).__hmRefresh = () => {
-			invalidateAll();
+			// invalidateAll() re-runs the LOAD functions but never re-fetches the app's JS, so a
+			// deploy while this WebView stayed open leaves OLD components rendering NEW data —
+			// silently wrong UI with right numbers (a workout showed "trusted" instead of its
+			// "our est." label for exactly this reason). updated.check() asks the server whether
+			// the build changed; if it did, only a hard reload can pick up the new components.
+			// Fire-and-forget so `return true` stays synchronous — the native side reads it to
+			// confirm the hook exists, and a Promise there would not survive evaluateJavaScript.
+			updated.check().then((isNewBuild) => (isNewBuild ? location.reload() : invalidateAll()));
 			return true;
 		};
 
