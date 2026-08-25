@@ -17,7 +17,12 @@ import { APP_TZ, todayLabel } from '$lib/server/day';
 import { addDays, fallbackWorkoutKcal } from '$lib/energy';
 import { bolusableForLoggedEntry } from '$lib/netCarbs';
 import { getFiberMode } from '$lib/server/prefs';
-import { loadIsBreakDay, toggleBreakDay } from '$lib/server/breakDays';
+import {
+	loadIsBreakDay,
+	loadIsMentalHealthDay,
+	toggleBreakDay,
+	toggleMentalHealthDay
+} from '$lib/server/breakDays';
 
 // Well-formed AND real: '2026-02-31' is well-formed but rolls into March, and an
 // invalid Date would throw on toISOString — so check getTime() before round-tripping.
@@ -138,7 +143,10 @@ export async function load({ params }) {
 	const glucose = dexcomGlucose.length ? dexcomGlucose : pumpGlucoseRows;
 
 	const fiberMode = await getFiberMode();
-	const breakDay = (await loadIsBreakDay())(date);
+	const [breakDay, mentalHealthDay] = await Promise.all([
+		loadIsBreakDay().then((f) => f(date)),
+		loadIsMentalHealthDay().then((f) => f(date))
+	]);
 	const entriesWithBolusable = entries.map((e) => {
 		const b = bolusableForLoggedEntry(
 			e.carbsG,
@@ -184,7 +192,8 @@ export async function load({ params }) {
 		prevDate: addDays(date, -1),
 		nextDate: addDays(date, 1),
 		today,
-		breakDay
+		breakDay,
+		mentalHealthDay
 	};
 }
 
@@ -196,5 +205,16 @@ export const actions = {
 		if (!isDate(params.date)) return fail(400, { breakError: 'Bad date.' });
 		if (params.date > todayLabel()) return fail(400, { breakError: 'That day is in the future.' });
 		return { breakDay: await toggleBreakDay(params.date) };
+	},
+
+	// Mark/unmark this day as a mental health day: nothing logged, intake imputed at
+	// maintenance + a surplus, day excluded from scoring. Same date-from-the-URL rule as
+	// above. `usedThisMonth` drives a soft warning in the UI — never a rejection.
+	toggleMentalHealth: async ({ params }) => {
+		if (!isDate(params.date)) return fail(400, { mentalHealthError: 'Bad date.' });
+		if (params.date > todayLabel())
+			return fail(400, { mentalHealthError: 'That day is in the future.' });
+		const { on, usedThisMonth } = await toggleMentalHealthDay(params.date);
+		return { mentalHealthDay: on, usedThisMonth };
 	}
 };

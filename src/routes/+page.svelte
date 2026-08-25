@@ -108,6 +108,10 @@
 	// Shared across both so a tap on either keeps them consistent; persisted locally.
 	const MODE_KEY = 'macroDisplayMode';
 	let showRemaining = $state(true);
+	// A day off never leads with what's LEFT: "2,213 kcal left" / "180g left" is a target to
+	// chase, and today has none. The consumed framing shows the same numbers as a record of
+	// the day instead of a demand on it, and it already exists — no separate no-target mode.
+	let leadWithRemaining = $derived(showRemaining && !data.mentalHealthDay);
 
 	onMount(() => {
 		if (localStorage.getItem(MODE_KEY) === 'consumed') showRemaining = false;
@@ -185,12 +189,24 @@
 	<section class="card mt-4 p-5">
 		<div class="mb-3 flex items-center justify-between">
 			<h2 class="font-semibold text-white">Today</h2>
-			<span
-				class="rounded-full px-2 py-0.5 text-xs font-semibold"
-				style="background: rgba(251,146,60,0.15); color: #fdba74;"
-			>
-				{goalPct}%
-			</span>
+			<!-- This badge is percent-of-calorie-target CONSUMED. On a day off nothing is
+			     logged, so it would sit at a red-looking 0% all day — reading as a failed day
+			     when the day was deliberately taken. Show the reason instead of the number. -->
+			{#if data.mentalHealthDay}
+				<span
+					class="rounded-full px-2 py-0.5 text-xs font-semibold"
+					style="background: rgba(148,163,184,0.15); color: var(--color-text-subtle);"
+				>
+					Day off
+				</span>
+			{:else}
+				<span
+					class="rounded-full px-2 py-0.5 text-xs font-semibold"
+					style="background: rgba(251,146,60,0.15); color: #fdba74;"
+				>
+					{goalPct}%
+				</span>
+			{/if}
 		</div>
 		<div class="mb-4 flex items-center justify-between gap-1">
 			<StatRing
@@ -208,10 +224,24 @@
 				value={totals.calories}
 				target={data.calorieTarget}
 				size={146}
-				{showRemaining}
+				showRemaining={leadWithRemaining}
 				ontoggle={toggleMode}
 			/>
-			{#if data.mode === 'cut'}
+			{#if data.mentalHealthDay}
+				<!-- Today is off. Both rings here measure food against a target, and today's
+				     intake is an assumption we made, not something logged — drawing a goal
+				     against it would be the app asking for something on the one day it
+				     shouldn't. A plain label, no progress, nothing to chase. -->
+				<div
+					class="flex flex-col items-center justify-center text-center"
+					style="width: 84px; height: 84px;"
+				>
+					<span class="text-2xl" aria-hidden="true">🌤️</span>
+					<span class="mt-1 text-xs font-semibold" style="color: var(--color-text-subtle);">
+						Day off
+					</span>
+				</div>
+			{:else if data.mode === 'cut'}
 				<StatRing
 					value={data.deficit}
 					target={data.deficitGoal}
@@ -242,7 +272,7 @@
 				value={totals.proteinG}
 				target={data.settings.proteinTargetG}
 				color="var(--color-protein)"
-				remaining={showRemaining}
+				remaining={leadWithRemaining}
 				ontoggle={toggleMode}
 			/>
 			<MacroBar label="Carbs" value={totals.carbsG} color="var(--color-carbs)" />

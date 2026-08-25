@@ -2,7 +2,7 @@ import { asc, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { bodyComp, settings } from '$lib/server/db/schema';
 import { APP_TZ, todayLabel } from '$lib/server/day';
-import { deficitDays, type DayEnergy } from '$lib/server/deficit';
+import { deficitDays, MENTAL_HEALTH_SURPLUS_KCAL, type DayEnergy } from '$lib/server/deficit';
 import { loadIsVacation } from '$lib/server/vacations';
 import {
 	linearRegression,
@@ -241,6 +241,20 @@ export function fillBmrGaps(days: DayEnergy[]): DayEnergy[] {
 		if (d.bmrKcal != null || filled[i] == null) return d;
 		const bmr = Math.round(filled[i]!);
 		const burned = bmr + (d.activeKcal ?? 0) + d.tefKcal;
+		// This is the first moment a mental health day with no BMR of its own HAS a
+		// maintenance figure, so impute against it here rather than booking `burned − 0` —
+		// which would turn the day we deliberately left unlogged into a full-day fast, the
+		// precise misreading the imputation exists to prevent.
+		if (d.mentalHealth && !d.imputed)
+			return {
+				...d,
+				bmrKcal: bmr,
+				bmrSource: 'interpolated' as const,
+				burnedKcal: Math.round(burned),
+				intakeKcal: Math.round(burned + MENTAL_HEALTH_SURPLUS_KCAL),
+				deficitKcal: -MENTAL_HEALTH_SURPLUS_KCAL,
+				imputed: true
+			};
 		return {
 			...d,
 			bmrKcal: bmr,
@@ -476,7 +490,11 @@ export async function energyInsights({
 	const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 	const avgIntakeKcal = mean(logged.map((d) => d.intakeKcal));
-	const avgProteinG = mean(logged.map((d) => d.proteinG));
+	// Macros skip imputed (mental health) days: the imputed INTAKE is a deliberate
+	// assumption and belongs in the average above, but proteinG is 0 purely because nothing
+	// was logged. Averaging that in would invent a protein crash that never happened and
+	// drag proteinAdequate down with it.
+	const avgProteinG = mean(logged.filter((d) => !d.imputed).map((d) => d.proteinG));
 	const estimatedTdee = mean(withBurn.map((d) => d.burnedKcal as number));
 
 	// Calibrated TDEE + the energy-based projections multiply avg intake across the

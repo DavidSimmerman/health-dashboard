@@ -2,10 +2,15 @@ import { sql, eq, and, gte, lte } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { workouts, settings, activityDays } from '$lib/server/db/schema';
 import { APP_TZ, todayLabel } from '$lib/server/day';
-import { deficitDays, type DayEnergy, type DayCorrection } from '$lib/server/deficit';
+import {
+	deficitDays,
+	MENTAL_HEALTH_SURPLUS_KCAL,
+	type DayEnergy,
+	type DayCorrection
+} from '$lib/server/deficit';
 import { fillBmrGaps, energyInsights, projAt } from '$lib/server/projections';
 import { loadIsVacation } from '$lib/server/vacations';
-import { loadIsBreakDay } from '$lib/server/breakDays';
+import { loadIsBreakDay, loadIsMentalHealthDay } from '$lib/server/breakDays';
 import {
 	addDays,
 	correctActive,
@@ -146,7 +151,8 @@ export type EnergyContext = {
 	weightKg: number | null;
 	modeDeltaKcal: number | null; // the MODE's signed delta — the ongoing goal, and what scoring keys off
 	breakDay: boolean; // today is a break day: eat at maintenance, no deficit asked
-	todayDeltaKcal: number | null; // modeDeltaKcal, or 0 on a break day — the delta TODAY's targets use
+	mentalHealthDay: boolean; // today is off entirely: nothing logged, no target, no ring pressure
+	todayDeltaKcal: number | null; // modeDeltaKcal, or 0 on a break/mental health day — the delta TODAY's targets use
 	balanceKcal: number; // signed deficit balance folded into today's targets (+ recovery / − debt; 0 when none / non-cut / break day)
 	targetKcal: number | null; // RATCHET eat-to goal (display): rises with real burn, never drops
 	stableTargetKcal: number | null; // non-ratcheting assumed intake for deficit math (= correction.todayTargetKcal)
@@ -232,10 +238,18 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	const countedByDate = new Map([...woByDate].map(([d, v]) => [d, v.counted]));
 
 	// Correction factor from COMPLETED, logged days (today's partial excluded).
-	// Vacation days don't train it — trip food is guesswork.
-	const [isVac, isBreak] = await Promise.all([loadIsVacation(), loadIsBreakDay()]);
+	// Vacation days don't train it — trip food is guesswork. Nor do imputed (mental health)
+	// days: `!d.imputed` keeps a day whose intake WE invented out of the fit, and with it a
+	// tefKcal of 0 that would understate avgTef and inflate the implied real active burn.
+	// The deficit bank below reads the same set, so a granted day also can't create debt.
+	const [isVac, isBreak, isMentalHealth] = await Promise.all([
+		loadIsVacation(),
+		loadIsBreakDay(),
+		loadIsMentalHealthDay()
+	]);
 	const completed = windowLedger.filter(
-		(d) => d.date < today && d.intakeKcal > 0 && d.burnedKcal != null && !isVac(d.date)
+		(d) =>
+			d.date < today && d.intakeKcal > 0 && !d.imputed && d.burnedKcal != null && !isVac(d.date)
 	);
 	const avgBmr = mean(completed.map((d) => d.bmrKcal ?? 0));
 	const avgTef = mean(completed.map((d) => d.tefKcal));
@@ -302,7 +316,13 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 	// drop the cut cushion, so the goal IS maintenance rather than 90% of it. The MODE's
 	// delta is untouched: scoring's ongoing goal and the balance cap still key off it.
 	const breakDay = isBreak(today);
-	const todayDeltaKcal = breakDay ? 0 : modeDeltaKcal;
+	// A mental health day takes the same 0 delta, for a stronger reason: its intake is
+	// IMPUTED at maintenance + a surplus, so leaving the cut delta in place would have the
+	// day's own assumed surplus counted against a full deficit goal — the Active ring would
+	// open demanding well over a thousand kcal of burn to "catch up" on a day whose entire
+	// point is that nothing is being asked of you.
+	const mentalHealthDay = isMentalHealth(today);
+	const todayDeltaKcal = breakDay || mentalHealthDay ? 0 : modeDeltaKcal;
 
 	// Conservative-burn floor (fixed for the day). recomp/lean_bulk get no haircut (targetBaseline).
 	const baseKcal =
@@ -390,6 +410,7 @@ export async function resolveCorrection(settingsRow?: SettingsRow | null): Promi
 		weightKg,
 		modeDeltaKcal,
 		breakDay,
+		mentalHealthDay,
 		todayDeltaKcal,
 		balanceKcal,
 		targetKcal,
@@ -505,7 +526,16 @@ export async function energyBreakdown(): Promise<EnergyBreakdown> {
 			// active instead of a dash that contradicts the burn it's already counted in.
 			correctedActiveKcal: d.activeKcal != null || trustedKcal > 0 ? Math.round(ca) : null,
 			correctedBurnedKcal: cb != null ? Math.round(cb) : null,
-			correctedDeficitKcal: cb != null ? Math.round(cb - d.intakeKcal) : null,
+			// A mental health day's intake is anchored to MAINTENANCE, so it has to be re-anchored
+			// to the CORRECTED burn here — `d.intakeKcal` came off the raw ledger, and pairing it
+			// with corrected burn would drift the surplus away from the allowance by exactly the
+			// size of the active correction, contradicting what correctedDeficitDays reports.
+			...(d.imputed && cb != null
+				? {
+						intakeKcal: Math.round(cb + MENTAL_HEALTH_SURPLUS_KCAL),
+						correctedDeficitKcal: -MENTAL_HEALTH_SURPLUS_KCAL
+					}
+				: { correctedDeficitKcal: cb != null ? Math.round(cb - d.intakeKcal) : null }),
 			workouts: ctx.woByDate.get(d.date)?.list ?? []
 		};
 	});

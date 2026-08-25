@@ -10,6 +10,7 @@ import {
 	correctActive,
 	isUncountedWorkout
 } from '$lib/energy';
+import { loadIsMentalHealthDay } from '$lib/server/breakDays';
 
 // One day of the energy ledger. `burnedKcal`/`deficitKcal` are null when we
 // can't estimate expenditure (no body comp ever synced AND no Apple basal) —
@@ -25,7 +26,23 @@ export type DayEnergy = {
 	burnedKcal: number | null;
 	deficitKcal: number | null; // positive = deficit
 	weightKg: number | null; // latest weigh-in on/before this day
+	// This day was marked a mental health day. Set whether or not the imputation below
+	// could actually be applied, so a later pass that MANUFACTURES a burn (fillBmrGaps)
+	// can still impute against it instead of booking a phantom fast.
+	mentalHealth: boolean;
+	// True when `intakeKcal` was IMPUTED rather than logged. Energy math should count it
+	// (that's why it exists); anything averaging MACROS must skip it, because proteinG and
+	// tefKcal are 0 for want of a food log, not because nothing was eaten.
+	imputed: boolean;
 };
+
+// What a mental health day is assumed to have eaten, over that day's own maintenance.
+// Nothing is logged, so without an imputed figure the calibration sees a weight gain with
+// zero food behind it and "explains" it by revising TDEE DOWN — quietly tightening every
+// day that follows. ~1000 kcal ≈ 0.3 lb of fat-equivalent, about what one unrestrained day
+// really costs. ponytail: a flat constant, not a learned per-user figure — there's no
+// signal to learn from on a day with no log. Revisit only if the trend keeps disagreeing.
+export const MENTAL_HEALTH_SURPLUS_KCAL = 1000;
 
 // A resolved active-energy correction + dynamic today-target, applied only when
 // passed. Computed once by resolveCorrection() (energyBreakdown.ts) and threaded
@@ -150,6 +167,10 @@ export async function deficitDays(
 	const today = todayLabel();
 	const calorieTarget = settingsRow?.calorieTarget ?? 2100;
 	const correction = opts?.correction;
+	// Imputing here — at the single source of the energy ledger — is what makes every
+	// downstream consumer (calibration, projections, rollups, the UI) agree about a
+	// mental health day without each having to special-case it.
+	const isMentalHealth = await loadIsMentalHealthDay();
 
 	const days: DayEnergy[] = [];
 	// compByDate is ascending; walk it once with a pointer instead of a
@@ -216,13 +237,25 @@ export async function deficitDays(
 					)
 				: rawActive;
 		const burned = bmr != null ? bmr + (active ?? 0) + tef : null;
+		// A mental health day is unlogged BY DESIGN, so impute maintenance + a big-surplus
+		// allowance instead of reading 0 kcal off an empty log. Needs `burned` as the
+		// maintenance anchor; with no BMR for the day there's nothing to anchor to yet, so
+		// `mentalHealth` is recorded and fillBmrGaps finishes the job if it invents one.
+		const mentalHealth = isMentalHealth(date);
+		const imputed = mentalHealth && burned != null;
 		// Predicted intake for the deficit: today, eat at least to target; else actual.
 		const targetToday = correction?.todayTargetKcal ?? calorieTarget;
-		const effIntake = date === today ? Math.max(intakeKcal, targetToday) : intakeKcal;
+		const effIntake = imputed
+			? burned + MENTAL_HEALTH_SURPLUS_KCAL
+			: date === today
+				? Math.max(intakeKcal, targetToday)
+				: intakeKcal;
 
 		days.push({
 			date,
-			intakeKcal,
+			// Report the imputed figure as the day's intake so the energy identity still
+			// balances across the window (Σintake − Σburn must explain the weight change).
+			intakeKcal: imputed ? Math.round(effIntake) : intakeKcal,
 			proteinG: intake?.proteinG ?? 0,
 			bmrKcal: bmr != null ? Math.round(bmr) : null,
 			bmrSource,
@@ -230,7 +263,9 @@ export async function deficitDays(
 			tefKcal: Math.round(tef),
 			burnedKcal: burned != null ? Math.round(burned) : null,
 			deficitKcal: burned != null ? Math.round(burned - effIntake) : null,
-			weightKg: comp?.weightKg ?? null
+			weightKg: comp?.weightKg ?? null,
+			mentalHealth,
+			imputed
 		});
 	}
 	return days;

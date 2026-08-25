@@ -1,0 +1,1 @@
+ALTER TABLE "break_days" ADD COLUMN "kind" text DEFAULT 'maintenance' NOT NULL;

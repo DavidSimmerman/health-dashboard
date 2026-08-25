@@ -157,10 +157,14 @@ export async function load() {
 	// in a surplus, that's how much to burn to climb back to maintenance; already at or
 	// past maintenance, the max() floors it at 0. Big early-morning numbers are the
 	// ring's normal behaviour on every day — it counts down as real burn accrues.
+	// A mental health day IS the one case that needs the special-case a break day must not
+	// get. On a break day the number is real — you logged food, so the gap to maintenance is
+	// measured. Here the "surplus" is our own assumption about a day you chose not to log,
+	// so turning it into a burn demand would invent a chore out of an imputation.
 	const activeToGo =
-		todayEnergy?.deficitKcal != null
-			? Math.max(0, Math.round(deficitGoal - todayEnergy.deficitKcal))
-			: null;
+		ctx.mentalHealthDay || todayEnergy?.deficitKcal == null
+			? null
+			: Math.max(0, Math.round(deficitGoal - todayEnergy.deficitKcal));
 
 	return {
 		settings: settingsRow ?? {
@@ -184,6 +188,10 @@ export async function load() {
 		activeToGo,
 		deficitTarget: settingsRow?.deficitTargetKcal ?? 500,
 		goalScore,
+		// Today is off: the svelte drops the deficit/active ring entirely rather than draw a
+		// goal against an intake we invented. goalScore is already null (the day is out of
+		// scoring), so the score ring blanks itself.
+		mentalHealthDay: ctx.mentalHealthDay,
 		// The APP_TZ date, so the header links to the day the SERVER calls today (the
 		// browser's own clock can be a zone off and open the wrong day detail).
 		today

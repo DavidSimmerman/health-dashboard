@@ -14,7 +14,7 @@ import { addDays } from '$lib/energy';
 import { weekToDate } from '$lib/period';
 import { glucoseStats } from '$lib/glucose';
 import { loadSpecsFor } from '$lib/server/vacations';
-import { loadIsBreakDay } from '$lib/server/breakDays';
+import { loadIsBreakDay, loadIsMentalHealthDay } from '$lib/server/breakDays';
 import {
 	scoreDay,
 	scorePeriod,
@@ -121,8 +121,19 @@ export async function dayMetricsForRange(
 		metricsBy.set(r.date, m);
 	}
 
+	// A mental health day is dropped from the metrics ENTIRELY, which is what "excluded
+	// from goals" has to mean to be honest. Leaving it in with null food goals would score
+	// it on the remaining goals and quietly inflate the day (and the week/month average)
+	// toward 100 for a day that was never attempted. Dropping it here — the one source every
+	// scoring surface reads — also keeps it out of the streak walk (a granted day doesn't
+	// break a streak), the week strip, and the bank/debt carry-over, with no per-site guards.
+	const isMentalHealth = await loadIsMentalHealthDay();
 	const out: DayMetrics[] = [];
 	for (let date = from; date <= to; date = addDays(date, 1)) {
+		if (isMentalHealth(date)) {
+			if (date === to) break;
+			continue;
+		}
 		const e = energyBy.get(date);
 		const m = metricsBy.get(date) ?? {};
 		const gl = glucoseFor(date, m);
@@ -230,6 +241,8 @@ export type GoalsView = {
 		goals: GoalResult[];
 		streak: number;
 		vacation: boolean; // this day falls inside a trip → relaxed targets applied
+		// this day was taken off entirely → not scored at all (score is null, not a zero)
+		mentalHealth: boolean;
 	};
 	week: PeriodSummary;
 	month: PeriodSummary;
@@ -331,11 +344,15 @@ export async function buildGoalsView(anchor: string): Promise<GoalsView> {
 		anchor > balWeekStart
 			? await dayMetricsForRange(balWeekStart, addDays(anchor, -1), correction)
 			: [];
-	const day = scoreDay(
-		(await dayMetricsForRange(anchor, anchor, correction))[0],
-		weekBalances(priorDays, specsFor),
-		specsFor(anchor)
-	);
+	// dayMetricsForRange drops mental health days, so this is empty on one — there is
+	// nothing to score, by design. Score only when a row came back; the null-score shape
+	// below is the same one a day with no data at all produces, so every reader (the /goals
+	// card, the MCP goal report) already handles it.
+	const anchorMetrics = (await dayMetricsForRange(anchor, anchor, correction))[0];
+	const mentalHealth = !anchorMetrics && (await loadIsMentalHealthDay())(anchor);
+	const day = anchorMetrics
+		? scoreDay(anchorMetrics, weekBalances(priorDays, specsFor), specsFor(anchor))
+		: { score: null, base: null, bonus: 0, bonusParts: [], goals: [] };
 
 	// Current streak ending on `anchor`: walk back in 60-day chunks until a
 	// non-perfect day, so a long run isn't truncated by a fixed window. The
@@ -405,7 +422,8 @@ export async function buildGoalsView(anchor: string): Promise<GoalsView> {
 			bonusParts: day.bonusParts,
 			goals: day.goals,
 			streak,
-			vacation: specsFor(anchor) === VACATION_SPECS
+			vacation: specsFor(anchor) === VACATION_SPECS,
+			mentalHealth
 		},
 		week,
 		month,

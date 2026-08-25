@@ -1126,11 +1126,16 @@ async function callGetEnergyLedger(id: Id, args: Record<string, unknown>) {
 		const counted = ledger.filter((d) => d.deficitKcal != null && d.intakeKcal > 0);
 		const n = counted.length;
 		const avg = (sum: number) => (n ? Math.round(sum / n) : null);
+		// Protein averages over LOGGED days only. A mental health day has a real (imputed)
+		// intake but a proteinG of 0 for want of a food log, so counting it would report a
+		// protein crash that never happened.
+		const logged = counted.filter((d) => !d.imputed);
+		const avgLogged = (sum: number) => (logged.length ? Math.round(sum / logged.length) : null);
 		const summary = {
 			countedDays: n,
 			avgDeficitKcal: avg(counted.reduce((a, d) => a + (d.deficitKcal ?? 0), 0)),
 			avgIntakeKcal: avg(counted.reduce((a, d) => a + d.intakeKcal, 0)),
-			avgProteinG: avg(counted.reduce((a, d) => a + d.proteinG, 0))
+			avgProteinG: avgLogged(logged.reduce((a, d) => a + d.proteinG, 0))
 		};
 		const payload = { from, to, summary, days: ledger };
 		const line = n

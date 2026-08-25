@@ -239,6 +239,34 @@
 				<p class="mt-2 text-xs text-red-400">{form.breakError}</p>
 			{/if}
 		</form>
+
+		<!-- Mental health day: nothing logged, a surplus assumed, day excluded from scoring.
+		     Soft budget of one a month — warned past the first, never blocked. -->
+		<form method="POST" action="?/toggleMentalHealth" class="mt-3" use:enhance>
+			<button
+				type="submit"
+				aria-pressed={data.mentalHealthDay}
+				class="w-full rounded-xl px-3 py-2 text-sm font-semibold transition hover:brightness-125"
+				style={data.mentalHealthDay
+					? 'background: color-mix(in srgb, var(--color-accent-to) 20%, transparent); color: var(--color-accent-to);'
+					: 'background: var(--color-bg-elevated); color: var(--color-text-subtle);'}
+			>
+				{data.mentalHealthDay ? 'Mental health day · not scored' : 'Make this a mental health day'}
+			</button>
+			<p class="mt-2 text-xs" style="color: var(--color-text-subtle);">
+				{data.mentalHealthDay
+					? 'Nothing to log — this day is out of your goals entirely, and a surplus is assumed so the scale makes sense. Tap to undo.'
+					: "Don't log anything. The day leaves your goals completely and a big surplus is assumed, so a jump on the scale isn't blamed on your metabolism."}
+			</p>
+			{#if form?.mentalHealthDay && (form?.usedThisMonth ?? 0) > 1}
+				<p class="mt-2 text-xs" style="color: var(--color-warning, #fbbf24);">
+					That's {form.usedThisMonth} this month. Worth a look at what's driving them.
+				</p>
+			{/if}
+			{#if form?.mentalHealthError}
+				<p class="mt-2 text-xs text-red-400">{form.mentalHealthError}</p>
+			{/if}
+		</form>
 	</section>
 
 	<!-- Food log -->

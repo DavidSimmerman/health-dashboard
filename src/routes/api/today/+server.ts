@@ -75,8 +75,15 @@ export async function GET({ request }) {
 	// widget's displayed calorie goal uses the ratcheting eat-to target.
 	const stableTarget = ctx.stableTargetKcal ?? s?.calorieTarget ?? 2100;
 	const goalTarget = ctx.targetKcal ?? s?.calorieTarget ?? 2100;
-	const deficit =
-		burnedKcal != null ? Math.round(burnedKcal - Math.max(calSum, stableTarget)) : null;
+	// A mental health day has no logged intake to reason about — the ledger already decided
+	// what the day assumes, so take its number rather than re-deriving one from an empty food
+	// log. Re-deriving would land near zero (calSum 0, stableTarget = maintenance) and the
+	// widget would quietly contradict every other surface, which reports the full surplus.
+	const deficit = day?.imputed
+		? (day.deficitKcal ?? null)
+		: burnedKcal != null
+			? Math.round(burnedKcal - Math.max(calSum, stableTarget))
+			: null;
 
 	return json({
 		date: today,

@@ -193,7 +193,20 @@
 	<section class="card mb-3 flex items-center gap-5 p-5">
 		<ScoreRing score={day.score} />
 		<div class="min-w-0 flex-1">
-			{#if day.score == null}
+			{#if day.mentalHealth}
+				<!-- Also a null score, but for the opposite reason: not missing data, a day
+				     deliberately taken off. Saying "connect your sources" here would read as a
+				     broken integration and invite a fix for something working as intended. -->
+				<span class="text-lg font-bold text-white">Day off</span>
+				<!-- Precise on purpose: the DAILY goals really are dropped from the week and
+				     month averages, but the weekly strength/running targets still count this
+				     as a day that elapsed — same rule a break day follows. Claiming the day is
+				     out of the week entirely would be a promise the rollup doesn't keep. -->
+				<p class="mt-1 text-sm" style="color: var(--color-text-subtle);">
+					Mental health day — not scored, and out of your daily averages. Weekly workout targets
+					still run.
+				</p>
+			{:else if day.score == null}
 				<p class="text-sm" style="color: var(--color-text-subtle);">
 					No data yet — connect your sources.
 				</p>

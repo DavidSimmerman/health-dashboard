@@ -508,8 +508,16 @@ export const pumpGlucose = pgTable(
 // its deficit goal scores like a vacation day's (eating at maintenance = full marks).
 // ONLY the deficit relaxes — protein, steps, sleep etc. still count. At most one per
 // calendar week (Sun–Sat): marking a second day MOVES it (see server/breakDays.ts).
+// The table holds BOTH kinds of granted day (see `kind`); a date can only be one.
 export const breakDays = pgTable('break_days', {
-	date: text('date').primaryKey() // local (APP_TZ) 'YYYY-MM-DD'
+	date: text('date').primaryKey(), // local (APP_TZ) 'YYYY-MM-DD'
+	//   'maintenance'   the weekly break day described above — food IS still logged.
+	//   'mental_health' nothing is logged, by design. Intake is IMPUTED at maintenance +
+	//                   MENTAL_HEALTH_SURPLUS_KCAL (see server/deficit.ts) so the scale
+	//                   bump has food behind it, and the day is excluded from scoring
+	//                   outright. Soft budget of one per calendar month: warned, never
+	//                   blocked — a hard cap on a mental health day defeats the point.
+	kind: text('kind').notNull().default('maintenance')
 });
 
 // A travel window where goal targets relax (see VACATION_SPECS in score.ts). Any
